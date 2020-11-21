@@ -13,6 +13,8 @@ import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.protocol.types.Field;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.elasticsearch.action.bulk.BulkRequest;
+import org.elasticsearch.action.bulk.BulkResponse;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.index.IndexResponse;
 import org.elasticsearch.client.RequestOptions;
@@ -65,7 +67,7 @@ public class ElasticSearchConsumer {
         properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, groupId);
         properties.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         properties.setProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false"); //to disable uto commit of offsets
-        properties.setProperty(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "10");
+        properties.setProperty(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "100");
 
         //create consumer
         KafkaConsumer<String, String> consumer = new KafkaConsumer<String, String>(properties);
@@ -91,42 +93,47 @@ public class ElasticSearchConsumer {
         KafkaConsumer<String, String> consumer = createConsumer("twitter_tweets");
 
         //poll for new data
-        while (true){
+        while (true) {
             ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
 
-            logger.info("Received " + records.count() + " records");
-            for (ConsumerRecord<String, String> record : records){
+            Integer recordCount = records.count();
+            logger.info("Received " + recordCount + " records");
+            BulkRequest bulkRequest = new BulkRequest();
+
+            for (ConsumerRecord<String, String> record : records) {
 
                 //2 strategies
                 //kafka generic id
                 //String id = record.topic() + "_" + record.partition() + "_" + record.offset();
 
                 //twitter feed specific id
-                String id = extractIdFromTweet(record.value());
+                try {
+                    String id = extractIdFromTweet(record.value());
 
-                //where we insert data into ElasticSearch
-                IndexRequest indexRequest =
-                        new IndexRequest(
-                                "twitter",
-                                "tweets",
-                                id //to make consumer idempotent
-                                 ).source(record.value(), XContentType.JSON);
+                    //where we insert data into ElasticSearch
+                    IndexRequest indexRequest =
+                            new IndexRequest(
+                                    "twitter",
+                                    "tweets",
+                                    id //to make consumer idempotent
+                            ).source(record.value(), XContentType.JSON);
 
-                IndexResponse indexResponse = client.index(indexRequest, RequestOptions.DEFAULT);
-                logger.info(indexResponse.getId());
+                    bulkRequest.add(indexRequest);
+                } catch (NullPointerException e){
+                    logger.warn("skipping bad data: " + record.value());
+                }
+
+            }
+            if (recordCount > 0) {
+                BulkResponse bulkItemResponses = client.bulk(bulkRequest, RequestOptions.DEFAULT);
+                logger.info("Committing offsets...");
+                consumer.commitAsync();
+                logger.info("Offsets have been committed");
                 try {
                     Thread.sleep(1000);
                 } catch (InterruptedException e) {
                     e.printStackTrace();
                 }
-            }
-            logger.info("Committing offsets...");
-            consumer.commitAsync();
-            logger.info("Offsets have been committed");
-            try {
-                Thread.sleep(1000);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
             }
         }
         //close client gracefully
